@@ -75,7 +75,7 @@ function blankForm(type: FormType): Row {
   if (type === 'income') return { ...base, expectedDay: '5', startDate: today(), recurrence: 'MONTHLY' }
   if (type === 'receipts') return { ...base, receivedAt: today() }
   if (type === 'expenses') return { ...base, expenseDate: today(), dueDate: today() }
-  if (type === 'debts') return { description: '', originalAmount: '', interestAmount: '0', installmentCount: '2', firstDueDate: today(), notes: '' }
+  if (type === 'debts') return { description: '', originalAmount: '', interestAmount: '0', installmentCount: '2', firstDueDate: today(), notes: '', multi: false, startMonth: today().slice(0, 7), paidMonths: '0', plans: [{ amount: '', count: '12', day: '5' }, { amount: '', count: '12', day: '15' }] }
   return { name: '', kind: 'EXPENSE', color: '#2f7bff' }
 }
 
@@ -93,6 +93,7 @@ function buildPayload(type: FormType, f: Row, editing: boolean): Row {
   if (type === 'expenses') return { description: f.description, amount: Number(f.amount), expenseDate: f.expenseDate, dueDate: f.dueDate || null, notes: f.notes, ...(editing ? { categoryId: f.categoryId || null } : f.categoryId ? { categoryId: f.categoryId } : {}) }
   if (type === 'debts') {
     if (editing) return { description: f.description, notes: f.notes }
+    if (f.multi) return { description: f.description, notes: f.notes, startMonth: f.startMonth, paidMonths: Number(f.paidMonths || 0), schedules: (f.plans as Row[]).map((p) => ({ amount: Number(p.amount), count: Number(p.count), day: Number(p.day) })) }
     return { description: f.description, originalAmount: Number(f.originalAmount), interestAmount: Number(f.interestAmount || 0), installmentCount: Number(f.installmentCount), firstDueDate: f.firstDueDate, notes: f.notes }
   }
   return { name: f.name, kind: f.kind, color: f.color }
@@ -453,12 +454,18 @@ export default function Page() {
     const open = openDebt === x.id
     const parcels: Row[] = x.installments ?? []
     const sameAmount = parcels.every((i) => Number(i.amount) === Number(parcels[0]?.amount))
+    const perMonth: Record<string, number> = {}
+    parcels.forEach((i) => { const k = String(i.dueDate).slice(0, 7); perMonth[k] = (perMonth[k] ?? 0) + 1 })
+    const multiDate = Object.values(perMonth).some((n) => n > 1)
+    const groups = new Map<string, { amount: number; count: number; day: number }>()
+    if (multiDate) [...parcels].sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate))).forEach((i) => { const k = String(Number(i.amount)); const g = groups.get(k); if (g) g.count++; else groups.set(k, { amount: Number(i.amount), count: 1, day: Number(String(i.dueDate).slice(8, 10)) }) })
+    const summary = multiDate ? [...groups.values()].map((g) => `${g.count}x de ${money(g.amount)} (dia ${g.day})`).join(' + ') : sameAmount ? `${x.installmentCount}x de ${money(x.installmentAmount)}` : `${x.installmentCount} parcelas`
     return (
       <div className="debt-card" key={x.id}>
         <div className="debt-head">
           <div onClick={() => setOpenDebt(open ? null : x.id)}>
             <strong>{x.description}</strong>
-            <small>{sameAmount ? `${x.installmentCount}x de ${money(x.installmentAmount)}` : `${x.installmentCount} parcelas`} • 1º vencimento {fmtDate(x.firstDueDate)} • <span className={`badge ${badgeClass(x.status)}`}>{STATUS_LABEL[x.status]}</span></small>
+            <small>{summary} • 1º vencimento {fmtDate(x.firstDueDate)} • <span className={`badge ${badgeClass(x.status)}`}>{STATUS_LABEL[x.status]}</span></small>
           </div>
           <div className="row-right"><b>{money(x.totalAmount)}</b><button className="icon-btn" title="Ver parcelas" onClick={() => setOpenDebt(open ? null : x.id)}>{open ? <ChevronUp size={17} /> : <ChevronDown size={17} />}</button>{editDelete('debts', x)}</div>
         </div>
@@ -564,6 +571,27 @@ export default function Page() {
     if (type === 'debts') return (<>
       {field('Descrição', 'description', { required: true })}
       {editing ? <p className="hint">Valores e parcelas não podem ser alterados depois de criados. Para mudar, exclua e cadastre novamente.</p> : <>
+        <div className="modal-actions">
+          <button type="button" className={`btn small${!form.multi ? ' white' : ''}`} onClick={() => setForm({ ...form, multi: false })}>Uma data por mês</button>
+          <button type="button" className={`btn small${form.multi ? ' white' : ''}`} onClick={() => setForm({ ...form, multi: true })}>Mais de uma data por mês</button>
+        </div>
+      </>}
+      {!editing && form.multi && <>
+        <p className="hint">Cada plano tem valor da parcela, quantidade e dia do mês. Ex.: 12x de R$ 100 no dia 5 e 12x de R$ 50 no dia 15.</p>
+        {field('Mês da primeira parcela', 'startMonth', { type: 'month', required: true })}
+        {(form.plans as Row[]).map((pl, idx) => (
+          <div className="plan-row" key={idx}>
+            <label>Valor da parcela<input type="number" step="0.01" min="0.01" value={pl.amount} required onChange={(e) => setForm({ ...form, plans: form.plans.map((q: Row, j: number) => j === idx ? { ...q, amount: e.target.value } : q) })} /></label>
+            <label>Quantidade<input type="number" min="1" max="120" value={pl.count} required onChange={(e) => setForm({ ...form, plans: form.plans.map((q: Row, j: number) => j === idx ? { ...q, count: e.target.value } : q) })} /></label>
+            <label>Dia do mês<input type="number" min="1" max="31" value={pl.day} required onChange={(e) => setForm({ ...form, plans: form.plans.map((q: Row, j: number) => j === idx ? { ...q, day: e.target.value } : q) })} /></label>
+            {form.plans.length > 1 && <button type="button" className="icon-btn danger" title="Remover plano" onClick={() => setForm({ ...form, plans: form.plans.filter((_: Row, j: number) => j !== idx) })}><Trash2 size={16} /></button>}
+          </div>
+        ))}
+        {form.plans.length < 6 && <button type="button" className="btn small" onClick={() => setForm({ ...form, plans: [...form.plans, { amount: '', count: '12', day: '1' }] })}><Plus size={14} /> Adicionar plano</button>}
+        {field('Meses já pagos (a contar do mês da primeira parcela)', 'paidMonths', { type: 'number', min: '0', max: '120' })}
+        <p className="hint">Total: {money((form.plans as Row[]).reduce((a, pl) => a + Number(pl.amount || 0) * Number(pl.count || 0), 0))} em {(form.plans as Row[]).reduce((a, pl) => a + Number(pl.count || 0), 0)} parcelas. Os meses já pagos entram como pagos e a contagem segue no mês seguinte (ex.: pagou 05/09 e 15/09 → próximas 05/10 e 15/10).</p>
+      </>}
+      {!editing && !form.multi && <>
         {field('Valor bruto', 'originalAmount', { type: 'number', step: '0.01', min: '0.01', required: true })}
         {field('Juros', 'interestAmount', { type: 'number', step: '0.01', min: '0' })}
         {field('Número de parcelas', 'installmentCount', { type: 'number', min: '1', max: '480', required: true })}

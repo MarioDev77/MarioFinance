@@ -209,3 +209,6 @@ input::placeholder, textarea::placeholder { color: #5f7199; }
   .cal-cell { min-height: 52px; padding: 5px; }
   .month-nav span { min-width: 120px; }
 }
+
+.plan-row { display: grid; grid-template-columns: 1.3fr 1fr 1fr auto; gap: 8px; align-items: end; }
+@media (max-width: 520px) { .plan-row { grid-template-columns: 1fr 1fr; } }

@@ -54,3 +54,20 @@ Significa que o backend publicado é mais antigo que o frontend e não tem a rot
    - o serviço deve apontar para o repositório/branch atual, com **Root Directory = `backend`**;
    - faça o commit e push desta versão e use *Redeploy* sem cache.
 3. Confira `NEXT_PUBLIC_API_URL` no frontend (Vercel): URL do backend, sem `/api` no final. Depois de alterar, faça novo deploy do frontend.
+
+## Dívida com mais de uma data por mês (ex.: celular)
+
+Em **Dívidas e parcelas → Nova dívida → "Mais de uma data por mês"**:
+
+- Mês da primeira parcela: `2026-09`
+- Plano 1: R$ 100,00 × 12, dia 5
+- Plano 2: R$ 50,00 × 12, dia 15
+- Meses já pagos: `1` (pagou 05/09 e 15/09; as próximas ficam 05/10 e 15/10)
+
+Total R$ 1.800,00 em 24 parcelas, numeradas por data. Os meses já pagos entram como PAGO e geram o registro em Pagamentos (forma "Outro").
+
+Para trocar a dívida "celular" atual (12x R$ 150): exclua e cadastre de novo com os dados acima. Excluir uma dívida agora também remove os pagamentos ligados a ela. Não precisa de migração de banco (não houve mudança no `schema.prisma`).
+
+Também mudou: parcela que vence **hoje** não é mais marcada como atrasada (só a partir do dia seguinte).
+
+Depois do deploy, `/api/health` deve responder `build: "multi-schedule-2026-10-05"`.

@@ -5,7 +5,7 @@ import { audit } from '@/lib/audit'
 import { hashPassword, verifyPassword } from '@/lib/password'
 import { rateLimit } from '@/lib/rate-limit'
 import { assertCsrf, assertOwnership, getSessionWithUser, requireAuth, revokeSession, setSessionCookie, clearSessionCookie } from '@/lib/session'
-import { generateInstallmentPlan, toDecimal, toMoneyString, monthBoundsUTC, incomeOccursInMonth } from '@/lib/finance'
+import { generateInstallmentPlan, generateMultiPlan, toDecimal, toMoneyString, monthBoundsUTC, incomeOccursInMonth } from '@/lib/finance'
 import { markOverdue } from '@/lib/overdue'
 import { Prisma } from '@prisma/client'
 
@@ -28,7 +28,7 @@ async function handle(req: NextRequest, parts: string[]) {
   const path = parts.join('/')
   const method = req.method
 
-  if (path === 'health' && method === 'GET') return json({ ok: true, build: 'routes-fix-2026-10-05-b', routes: ['dashboard', 'incoming', 'calendar', 'income', 'receipts', 'expenses', 'debts', 'installments', 'payments', 'categories', 'audit'] })
+  if (path === 'health' && method === 'GET') return json({ ok: true, build: 'multi-schedule-2026-10-05', routes: ['dashboard', 'incoming', 'calendar', 'income', 'receipts', 'expenses', 'debts', 'installments', 'payments', 'categories', 'audit'] })
 
   if (path === 'auth/login' && method === 'POST') {
     const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null
@@ -89,9 +89,34 @@ async function handle(req: NextRequest, parts: string[]) {
 
   if (parts[0] === 'debts') {
     if(method==='GET'&&parts.length===1){const debts=await prisma.debt.findMany({where:{userId,deletedAt:null},include:{installments:{orderBy:{installmentNumber:'asc'}},},orderBy:{firstDueDate:'asc'}});return json({data:serialize(debts)})}
-    if(method==='POST'&&parts.length===1){const b=await readJson(req);const original=toDecimal(requiredNumber(b,'originalAmount',0.01));const interest=toDecimal(Number(b.interestAmount??0));const total=original.plus(interest);const count=Math.floor(requiredNumber(b,'installmentCount',1));const first=requiredDate(b,'firstDueDate');const plan=generateInstallmentPlan(total,count,first);const debt=await prisma.$transaction(async tx=>{const d=await tx.debt.create({data:{userId,description:requiredString(b,'description'),originalAmount:original.toFixed(2),interestAmount:interest.toFixed(2),totalAmount:total.toFixed(2),installmentCount:count,installmentAmount:plan[0].amount.toFixed(2),firstDueDate:first,notes:optionalString(b,'notes')}});await tx.debtInstallment.createMany({data:plan.map(p=>({debtId:d.id,installmentNumber:p.installmentNumber,amount:p.amount.toFixed(2),dueDate:p.dueDate}))});return d});await audit({userId,action:'CREATE',tableName:'debts',recordId:debt.id,newData:debt,ipAddress:ip});return json({data:serialize(await prisma.debt.findUnique({where:{id:debt.id},include:{installments:true}}))},{status:201})}
+    if(method==='POST'&&parts.length===1){
+      const b=await readJson(req)
+      if(Array.isArray(b.schedules)){
+      const raw=b.schedules as any[]
+      if(raw.length<1||raw.length>6)throw new ApiError(400,'VALIDATION_ERROR','Informe de 1 a 6 planos de parcelas.')
+      const schedules=raw.map((x:any)=>{const amount=Number(x?.amount),count=Math.floor(Number(x?.count)),day=Math.floor(Number(x?.day));if(!(amount>=0.01)||!(count>=1&&count<=120)||!(day>=1&&day<=31))throw new ApiError(400,'VALIDATION_ERROR','Plano de parcelas inválido (valor, quantidade ou dia).');return{amount,count,day}})
+      const m=/^(\d{4})-(\d{2})$/.exec(String(b.startMonth??''));if(!m||Number(m[2])<1||Number(m[2])>12)throw new ApiError(400,'VALIDATION_ERROR','Mês de início inválido.')
+      const paidMonths=Math.max(0,Math.floor(Number(b.paidMonths??0)));if(!Number.isFinite(paidMonths))throw new ApiError(400,'VALIDATION_ERROR','Meses já pagos inválido.')
+      const plan=generateMultiPlan(schedules,Number(m[1]),Number(m[2])-1)
+      const total=plan.reduce((a,p)=>a.plus(p.amount),toDecimal(0))
+      const paidItems=plan.filter(p=>p.monthOffset<paidMonths)
+      const paidTotal=paidItems.reduce((a,p)=>a.plus(p.amount),toDecimal(0))
+      const description=requiredString(b,'description')
+      const debt=await prisma.$transaction(async tx=>{
+        const d=await tx.debt.create({data:{userId,description,originalAmount:total.toFixed(2),interestAmount:'0.00',totalAmount:total.toFixed(2),installmentCount:plan.length,installmentAmount:plan[0].amount.toFixed(2),firstDueDate:plan[0].dueDate,paidAmount:paidTotal.toFixed(2),status:paidTotal.gte(total)?'PAID':'ACTIVE',notes:optionalString(b,'notes')}})
+        await tx.debtInstallment.createMany({data:plan.map(p=>({debtId:d.id,installmentNumber:p.installmentNumber,amount:p.amount.toFixed(2),dueDate:p.dueDate,status:p.monthOffset<paidMonths?'PAID' as const:'PENDING' as const,paidAt:p.monthOffset<paidMonths?p.dueDate:null}))})
+        if(paidItems.length){
+          const created=await tx.debtInstallment.findMany({where:{debtId:d.id,status:'PAID'}})
+          const byNum=new Map(created.map(i=>[i.installmentNumber,i.id]))
+          await tx.payment.createMany({data:paidItems.map(p=>({userId,amount:p.amount.toFixed(2),paidAt:p.dueDate,description:`${description} — parcela ${p.installmentNumber}/${plan.length}`,source:'INSTALLMENT' as const,method:'OUTRO' as const,installmentId:byNum.get(p.installmentNumber)!,debtId:d.id}))})
+        }
+        return d})
+      await audit({userId,action:'CREATE',tableName:'debts',recordId:debt.id,newData:debt,ipAddress:ip})
+      return json({data:serialize(await prisma.debt.findUnique({where:{id:debt.id},include:{installments:true}}))},{status:201})
+      }
+      const original=toDecimal(requiredNumber(b,'originalAmount',0.01));const interest=toDecimal(Number(b.interestAmount??0));const total=original.plus(interest);const count=Math.floor(requiredNumber(b,'installmentCount',1));const first=requiredDate(b,'firstDueDate');const plan=generateInstallmentPlan(total,count,first);const debt=await prisma.$transaction(async tx=>{const d=await tx.debt.create({data:{userId,description:requiredString(b,'description'),originalAmount:original.toFixed(2),interestAmount:interest.toFixed(2),totalAmount:total.toFixed(2),installmentCount:count,installmentAmount:plan[0].amount.toFixed(2),firstDueDate:first,notes:optionalString(b,'notes')}});await tx.debtInstallment.createMany({data:plan.map(p=>({debtId:d.id,installmentNumber:p.installmentNumber,amount:p.amount.toFixed(2),dueDate:p.dueDate}))});return d});await audit({userId,action:'CREATE',tableName:'debts',recordId:debt.id,newData:debt,ipAddress:ip});return json({data:serialize(await prisma.debt.findUnique({where:{id:debt.id},include:{installments:true}}))},{status:201})}
     if(method==='PATCH'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null},include:{installments:true}});assertOwnership(old,userId);const b=await readJson(req);const data:any={};if(b.description!==undefined)data.description=requiredString(b,'description');if(b.notes!==undefined)data.notes=optionalString(b,'notes');if(b.status!==undefined)data.status=b.status;const d=await prisma.debt.update({where:{id},data});await audit({userId,action:'UPDATE',tableName:'debts',recordId:id,oldData:old,newData:d,ipAddress:ip});return json({data:serialize(d)})}
-    if(method==='DELETE'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null}});assertOwnership(old,userId);await prisma.debt.update({where:{id},data:{deletedAt:new Date(),deletedBy:userId,status:'CANCELLED'}});return json({ok:true})}
+    if(method==='DELETE'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null}});assertOwnership(old,userId);await prisma.$transaction([prisma.debt.update({where:{id},data:{deletedAt:new Date(),deletedBy:userId,status:'CANCELLED'}}),prisma.payment.updateMany({where:{debtId:id,userId,deletedAt:null},data:{deletedAt:new Date(),deletedBy:userId}})]);await audit({userId,action:'DELETE',tableName:'debts',recordId:id,oldData:old,ipAddress:ip});return json({ok:true})}
   }
 
   if (parts[0] === 'installments' && parts.length === 2 && method === 'PATCH') {

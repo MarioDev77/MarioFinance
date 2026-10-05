@@ -105,3 +105,28 @@ export function percentage(part: Decimal | number | string, base: Decimal | numb
   if (b.isZero()) return new Decimal(0)
   return toDecimal(part).dividedBy(b).times(100).toDecimalPlaces(2)
 }
+
+export type Schedule = { amount: number; count: number; day: number }
+export type MultiPlanItem = { installmentNumber: number; amount: Decimal; dueDate: Date; monthOffset: number }
+
+/**
+ * Plano com varias datas por mes (ex.: 12x de 100 no dia 5 + 12x de 50 no dia 15).
+ * Todos os planos comecam no mesmo mes (startYear/startMonth0). As parcelas sao ordenadas
+ * por data e numeradas 1..N. monthOffset = quantos meses depois do mes inicial a parcela vence.
+ */
+export function generateMultiPlan(schedules: Schedule[], startYear: number, startMonth0: number): MultiPlanItem[] {
+  const items: Omit<MultiPlanItem, 'installmentNumber'>[] = []
+  schedules.forEach((sc) => {
+    for (let i = 0; i < sc.count; i++) {
+      const first = new Date(Date.UTC(startYear, startMonth0 + i, 1))
+      const day = Math.min(sc.day, daysInMonth(first.getUTCFullYear(), first.getUTCMonth()))
+      items.push({
+        amount: toDecimal(sc.amount).toDecimalPlaces(2, Decimal.ROUND_HALF_UP),
+        dueDate: new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), day)),
+        monthOffset: i,
+      })
+    }
+  })
+  items.sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime())
+  return items.map((it, idx) => ({ ...it, installmentNumber: idx + 1 }))
+}
