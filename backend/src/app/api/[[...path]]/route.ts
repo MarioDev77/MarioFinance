@@ -1,0 +1,113 @@
+import { NextRequest } from 'next/server'
+import { prisma } from '@/lib/prisma'
+import { ApiError, errorResponse, json, readJson, requiredDate, requiredNumber, requiredString, optionalString } from '@/lib/http'
+import { audit } from '@/lib/audit'
+import { hashPassword, verifyPassword } from '@/lib/password'
+import { rateLimit } from '@/lib/rate-limit'
+import { assertCsrf, assertOwnership, getSessionWithUser, requireAuth, revokeSession, setSessionCookie, clearSessionCookie } from '@/lib/session'
+import { generateInstallmentPlan, toDecimal, toMoneyString, monthBoundsUTC, incomeOccursInMonth } from '@/lib/finance'
+import { Prisma } from '@prisma/client'
+
+export const dynamic = 'force-dynamic'
+
+type Ctx = { params: Promise<{ path?: string[] }> }
+const publicPaths = new Set(['auth/login'])
+const dateOnly = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+const serialize = (v: any): any => {
+  if (v instanceof Prisma.Decimal) return v.toFixed(2)
+  if (v instanceof Date) return v.toISOString()
+  if (Array.isArray(v)) return v.map(serialize)
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, serialize(x)]))
+  return v
+}
+const bodyId = (body: Record<string, unknown>) => { const id = body.id; if (typeof id !== 'string' || !id) throw new ApiError(400, 'VALIDATION_ERROR', 'id inválido.'); return id }
+const paramsId = (parts: string[]) => { const id = parts[1]; if (!id) throw new ApiError(400, 'VALIDATION_ERROR', 'id obrigatório.'); return id }
+
+async function handle(req: NextRequest, parts: string[]) {
+  const path = parts.join('/')
+  const method = req.method
+
+  if (path === 'auth/login' && method === 'POST') {
+    const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null
+    if (!rateLimit(`login:${ip ?? 'unknown'}`, 8, 60_000)) throw new ApiError(429, 'RATE_LIMITED', 'Muitas tentativas. Tente novamente em instantes.')
+    const body = await readJson(req)
+    const email = requiredString(body, 'email', 254).toLowerCase()
+    const password = requiredString(body, 'password', 200)
+    const user = await prisma.user.findUnique({ where: { email } })
+    if (!user || !(await verifyPassword(password, user.passwordHash))) throw new ApiError(401, 'INVALID_CREDENTIALS', 'E-mail ou senha inválidos.')
+    const old = await getSessionWithUser(); if (old) await revokeSession(old.id)
+    const { createSession } = await import('@/lib/session')
+    const session = await createSession(user.id, { ipAddress: ip, userAgent: req.headers.get('user-agent') })
+    await setSessionCookie(session.token, session.expiresAt)
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } })
+    await audit({ userId: user.id, action: 'LOGIN', tableName: 'users', recordId: user.id, ipAddress: ip })
+    return json({ user: { id: user.id, name: user.name, email: user.email }, csrfToken: session.csrfToken })
+  }
+  if (path === 'auth/logout' && method === 'POST') {
+    const session = await getSessionWithUser(); if (session) { assertCsrf(session, req); await revokeSession(session.id); await audit({ userId: session.userId, action: 'LOGOUT', tableName: 'sessions', recordId: session.id }) }
+    await clearSessionCookie(); return json({ ok: true })
+  }
+  if (path === 'auth/me' && method === 'GET') {
+    const session = await getSessionWithUser(); if (!session) throw new ApiError(401, 'UNAUTHORIZED', 'Acesso não autorizado.')
+    return json({ user: { id: session.user.id, name: session.user.name, email: session.user.email }, csrfToken: session.csrfToken })
+  }
+
+  const session = await requireAuth()
+  if (method !== 'GET' && method !== 'HEAD') assertCsrf(session, req)
+  const userId = session.userId
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null
+
+  if (path === 'categories') {
+    if (method === 'GET') return json({ data: serialize(await prisma.category.findMany({ where: { userId, deletedAt: null }, orderBy: { name: 'asc' } })) })
+    if (method === 'POST') { const b=await readJson(req); const name=requiredString(b,'name',80); const kind=b.kind==='RECEIPT'?'RECEIPT':'EXPENSE'; const c=await prisma.category.create({data:{userId,name,kind,color:optionalString(b,'color',30)}}); await audit({userId,action:'CREATE',tableName:'categories',recordId:c.id,newData:c,ipAddress:ip}); return json({data:serialize(c)},{status:201}) }
+    if (method === 'DELETE') { const id=paramsId(parts); const c=await prisma.category.findFirst({where:{id,userId,deletedAt:null}}); assertOwnership(c,userId); await prisma.category.update({where:{id},data:{deletedAt:new Date(),deletedBy:userId}}); return json({ok:true}) }
+  }
+
+  const simpleMap: Record<string, 'monthlyIncome'|'receipt'|'expense'> = { income:'monthlyIncome', receipts:'receipt', expenses:'expense' }
+  if (simpleMap[parts[0]]) {
+    const model = simpleMap[parts[0]]
+    if (method === 'GET') {
+      const rows = await (prisma[model] as any).findMany({where:{userId,deletedAt:null},include:model==='expense'?{category:true}:model==='receipt'?{category:true}:undefined,orderBy:model==='monthlyIncome'?{createdAt:'desc'}:model==='expense'?{expenseDate:'desc'}:{receivedAt:'desc'}})
+      return json({data:serialize(rows)})
+    }
+    if (method === 'POST') {
+      const b=await readJson(req)
+      let row:any
+      if(model==='monthlyIncome') row=await prisma.monthlyIncome.create({data:{userId,description:requiredString(b,'description'),amount:toMoneyString(toDecimal(requiredNumber(b,'amount',0.01))),expectedDay:Math.min(31,Math.max(1,Math.floor(requiredNumber(b,'expectedDay',1)))),status:'ACTIVE',recurrence:['MONTHLY','QUARTERLY','YEARLY'].includes(String(b.recurrence))?b.recurrence as any:'MONTHLY',startDate:requiredDate(b,'startDate'),endDate:b.endDate?requiredDate(b,'endDate'):null,notes:optionalString(b,'notes')}})
+      if(model==='receipt') row=await prisma.receipt.create({data:{userId,description:requiredString(b,'description'),amount:toMoneyString(toDecimal(requiredNumber(b,'amount',0.01))),receivedAt:requiredDate(b,'receivedAt'),categoryId:typeof b.categoryId==='string'?b.categoryId:null,notes:optionalString(b,'notes')}})
+      if(model==='expense') row=await prisma.expense.create({data:{userId,description:requiredString(b,'description'),amount:toMoneyString(toDecimal(requiredNumber(b,'amount',0.01))),expenseDate:requiredDate(b,'expenseDate'),dueDate:b.dueDate?requiredDate(b,'dueDate'):null,categoryId:typeof b.categoryId==='string'?b.categoryId:null,status:'PENDING',notes:optionalString(b,'notes')}})
+      await audit({userId,action:'CREATE',tableName:model,recordId:row.id,newData:row,ipAddress:ip}); return json({data:serialize(row)},{status:201})
+    }
+    if(method==='PATCH'){const id=paramsId(parts); const old:any=await (prisma[model] as any).findFirst({where:{id,userId,deletedAt:null}}); assertOwnership(old,userId); const b=await readJson(req); const data:any={}
+      if(b.description!==undefined)data.description=requiredString(b,'description'); if(b.amount!==undefined)data.amount=toMoneyString(toDecimal(requiredNumber(b,'amount',0.01))); if(b.notes!==undefined)data.notes=optionalString(b,'notes'); if(model==='monthlyIncome'){if(b.expectedDay!==undefined)data.expectedDay=Math.min(31,Math.max(1,Math.floor(requiredNumber(b,'expectedDay',1))));if(b.recurrence!==undefined)data.recurrence=b.recurrence;if(b.status!==undefined)data.status=b.status;if(b.startDate!==undefined)data.startDate=requiredDate(b,'startDate');if(b.endDate!==undefined)data.endDate=b.endDate?requiredDate(b,'endDate'):null} if(model==='receipt'&&b.receivedAt!==undefined)data.receivedAt=requiredDate(b,'receivedAt'); if(model==='expense'){if(b.expenseDate!==undefined)data.expenseDate=requiredDate(b,'expenseDate');if(b.dueDate!==undefined)data.dueDate=b.dueDate?requiredDate(b,'dueDate'):null;if(b.status!==undefined)data.status=b.status;if(b.categoryId!==undefined)data.categoryId=b.categoryId||null}
+      const row=await (prisma[model] as any).update({where:{id},data}); await audit({userId,action:'UPDATE',tableName:model,recordId:id,oldData:old,newData:row,ipAddress:ip}); return json({data:serialize(row)}) }
+    if(method==='DELETE'){const id=paramsId(parts); const old:any=await (prisma[model] as any).findFirst({where:{id,userId,deletedAt:null}});assertOwnership(old,userId);await (prisma[model] as any).update({where:{id},data:{deletedAt:new Date(),deletedBy:userId}});await audit({userId,action:'DELETE',tableName:model,recordId:id,oldData:old,ipAddress:ip});return json({ok:true})}
+  }
+
+  if (path === 'debts') {
+    if(method==='GET'){const debts=await prisma.debt.findMany({where:{userId,deletedAt:null},include:{installments:{orderBy:{installmentNumber:'asc'}},},orderBy:{firstDueDate:'asc'}});return json({data:serialize(debts)})}
+    if(method==='POST'){const b=await readJson(req);const original=toDecimal(requiredNumber(b,'originalAmount',0.01));const interest=toDecimal(Number(b.interestAmount??0));const total=original.plus(interest);const count=Math.floor(requiredNumber(b,'installmentCount',1));const first=requiredDate(b,'firstDueDate');const plan=generateInstallmentPlan(total,count,first);const debt=await prisma.$transaction(async tx=>{const d=await tx.debt.create({data:{userId,description:requiredString(b,'description'),originalAmount:original.toFixed(2),interestAmount:interest.toFixed(2),totalAmount:total.toFixed(2),installmentCount:count,installmentAmount:plan[0].amount.toFixed(2),firstDueDate:first,notes:optionalString(b,'notes')}});await tx.debtInstallment.createMany({data:plan.map(p=>({debtId:d.id,installmentNumber:p.installmentNumber,amount:p.amount.toFixed(2),dueDate:p.dueDate}))});return d});await audit({userId,action:'CREATE',tableName:'debts',recordId:debt.id,newData:debt,ipAddress:ip});return json({data:serialize(await prisma.debt.findUnique({where:{id:debt.id},include:{installments:true}}))},{status:201})}
+    if(method==='PATCH'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null},include:{installments:true}});assertOwnership(old,userId);const b=await readJson(req);const data:any={};if(b.description!==undefined)data.description=requiredString(b,'description');if(b.notes!==undefined)data.notes=optionalString(b,'notes');if(b.status!==undefined)data.status=b.status;const d=await prisma.debt.update({where:{id},data});await audit({userId,action:'UPDATE',tableName:'debts',recordId:id,oldData:old,newData:d,ipAddress:ip});return json({data:serialize(d)})}
+    if(method==='DELETE'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null}});assertOwnership(old,userId);await prisma.debt.update({where:{id},data:{deletedAt:new Date(),deletedBy:userId,status:'CANCELLED'}});return json({ok:true})}
+  }
+
+  if(path==='installments'&&method==='GET'){const rows=await prisma.debtInstallment.findMany({where:{debt:{userId,deletedAt:null}},include:{debt:true},orderBy:{dueDate:'asc'}});return json({data:serialize(rows)})}
+
+  if(path==='payments'){
+    if(method==='GET'){const rows=await prisma.payment.findMany({where:{userId,deletedAt:null},include:{expense:true,installment:true,debt:true},orderBy:{paidAt:'desc'}});return json({data:serialize(rows)})}
+    if(method==='POST'){const b=await readJson(req);const amount=toDecimal(requiredNumber(b,'amount',0.01));const source=String(b.source) as any;const methodP=String(b.method) as any;let expenseId:string|undefined,installmentId:string|undefined,debtId:string|undefined;if(source==='EXPENSE'){expenseId=requiredString(b,'expenseId');const e=await prisma.expense.findFirst({where:{id:expenseId,userId,deletedAt:null}});if(!e)throw new ApiError(404,'NOT_FOUND','Despesa não encontrada.')}if(source==='INSTALLMENT'){installmentId=requiredString(b,'installmentId');const inst=await prisma.debtInstallment.findFirst({where:{id:installmentId,debt:{userId,deletedAt:null}}});if(!inst)throw new ApiError(404,'NOT_FOUND','Parcela não encontrada.');debtId=inst.debtId}
+      const p=await prisma.$transaction(async tx=>{const payment=await tx.payment.create({data:{userId,amount:amount.toFixed(2),paidAt:b.paidAt?requiredDate(b,'paidAt'):new Date(),description:requiredString(b,'description'),source,method:methodP,expenseId,installmentId,debtId,notes:optionalString(b,'notes')}});if(expenseId)await tx.expense.update({where:{id:expenseId},data:{status:'PAID',paidAt:payment.paidAt}});if(installmentId){const inst=await tx.debtInstallment.update({where:{id:installmentId},data:{status:'PAID',paidAt:payment.paidAt}});const agg=await tx.debtInstallment.aggregate({where:{debtId:inst.debtId,status:'PAID'},_sum:{amount:true}});const debt=await tx.debt.findUnique({where:{id:inst.debtId}});const paid=agg._sum.amount??new Prisma.Decimal(0);if(debt)await tx.debt.update({where:{id:inst.debtId},data:{paidAmount:paid,status:paid.gte(debt.totalAmount)?'PAID':'ACTIVE'}})}return payment});await audit({userId,action:'PAYMENT',tableName:'payments',recordId:p.id,newData:p,ipAddress:ip});return json({data:serialize(p)},{status:201})}
+  }
+
+  if(path==='calendar'&&method==='GET'){const u=new URL(req.url);const year=Number(u.searchParams.get('year')??new Date().getUTCFullYear());const month=Number(u.searchParams.get('month')??new Date().getUTCMonth()+1);const {start,end}=monthBoundsUTC(year,month);const [incomes,receipts,expenses,installments]=await Promise.all([prisma.monthlyIncome.findMany({where:{userId,deletedAt:null,status:'ACTIVE'}}),prisma.receipt.findMany({where:{userId,deletedAt:null,receivedAt:{gte:start,lt:end}}}),prisma.expense.findMany({where:{userId,deletedAt:null,OR:[{expenseDate:{gte:start,lt:end}},{dueDate:{gte:start,lt:end}}]}}),prisma.debtInstallment.findMany({where:{debt:{userId,deletedAt:null},dueDate:{gte:start,lt:end}},include:{debt:true}})]);const events:any[]=[];for(const i of incomes){const x=incomeOccursInMonth(i,year,month);if(x.occurs)events.push({type:'INCOME',date:x.date,description:i.description,amount:i.amount,status:i.status})}for(const r of receipts)events.push({type:'RECEIPT',date:r.receivedAt,description:r.description,amount:r.amount,status:'RECEIVED'});for(const e of expenses)events.push({type:'EXPENSE',date:e.dueDate??e.expenseDate,description:e.description,amount:e.amount,status:e.status,id:e.id});for(const i of installments)events.push({type:'INSTALLMENT',date:i.dueDate,description:`${i.debt.description} — parcela ${i.installmentNumber}/${i.debt.installmentCount}`,amount:i.amount,status:i.status,id:i.id});return json({data:serialize(events.sort((a,b)=>new Date(a.date).getTime()-new Date(b.date).getTime()))})}
+
+  if(path==='dashboard'&&method==='GET'){const u=new URL(req.url);const now=new Date();const year=Number(u.searchParams.get('year')??now.getUTCFullYear());const month=Number(u.searchParams.get('month')??now.getUTCMonth()+1);const {start,end}=monthBoundsUTC(year,month);const [incomes,receipts,expenses,installments]=await Promise.all([prisma.monthlyIncome.findMany({where:{userId,deletedAt:null,status:'ACTIVE'}}),prisma.receipt.findMany({where:{userId,deletedAt:null,receivedAt:{gte:start,lt:end}}}),prisma.expense.findMany({where:{userId,deletedAt:null,OR:[{expenseDate:{gte:start,lt:end}},{dueDate:{gte:start,lt:end}}]}}),prisma.debtInstallment.findMany({where:{debt:{userId,deletedAt:null},dueDate:{gte:start,lt:end}}})]);let recurring=new Prisma.Decimal(0);for(const i of incomes){const x=incomeOccursInMonth(i,year,month);if(x.occurs)recurring=recurring.plus(i.amount)}const extra=receipts.reduce((a,r)=>a.plus(r.amount),new Prisma.Decimal(0));const exp=expenses.reduce((a,r)=>a.plus(r.amount),new Prisma.Decimal(0));const inst=installments.filter(x=>x.status!=='PAID').reduce((a,r)=>a.plus(r.amount),new Prisma.Decimal(0));return json({data:serialize({month:{year,month},income:{recurring,extra,total:recurring.plus(extra)},outflow:{expenses:exp,installments:inst,total:exp.plus(inst)},balance:recurring.plus(extra).minus(exp).minus(inst),upcomingInstallments:installments.filter(x=>x.status!=='PAID').slice(0,8),upcomingExpenses:expenses.filter(x=>x.status!=='PAID').slice(0,8)})})}
+
+  if(path==='audit'&&method==='GET'){const rows=await prisma.auditLog.findMany({where:{userId},orderBy:{createdAt:'desc'},take:100});return json({data:serialize(rows)})}
+  throw new ApiError(404,'NOT_FOUND','Rota não encontrada.')
+}
+
+export async function GET(req:NextRequest,ctx:Ctx){try{return await handle(req,await (await ctx.params).path??[])}catch(e){return errorResponse(e)}}
+export async function POST(req:NextRequest,ctx:Ctx){try{return await handle(req,await (await ctx.params).path??[])}catch(e){return errorResponse(e)}}
+export async function PATCH(req:NextRequest,ctx:Ctx){try{return await handle(req,await (await ctx.params).path??[])}catch(e){return errorResponse(e)}}
+export async function DELETE(req:NextRequest,ctx:Ctx){try{return await handle(req,await (await ctx.params).path??[])}catch(e){return errorResponse(e)}}
