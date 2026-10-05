@@ -180,6 +180,21 @@ async function handle(req: NextRequest, parts: string[]) {
     })})
   }
 
+  if (path === 'incoming' && method === 'GET') {
+    const u = new URL(req.url); const now = new Date()
+    const year = Number(u.searchParams.get('year') ?? now.getUTCFullYear()); const month = Number(u.searchParams.get('month') ?? now.getUTCMonth() + 1)
+    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12 || year < 2000 || year > 2100) throw new ApiError(400, 'VALIDATION_ERROR', 'Período inválido.')
+    const { start, end } = monthBoundsUTC(year, month)
+    const [incomes, receipts] = await Promise.all([
+      prisma.monthlyIncome.findMany({ where: { userId, deletedAt: null, status: 'ACTIVE' }, orderBy: { expectedDay: 'asc' } }),
+      prisma.receipt.findMany({ where: { userId, deletedAt: null, receivedAt: { gte: start, lt: end } }, include: { category: true }, orderBy: { receivedAt: 'asc' } }),
+    ])
+    const recurring = incomes.flatMap((i) => { const x = incomeOccursInMonth(i, year, month); return x.occurs ? [{ ...i, occursOn: x.date }] : [] })
+    const sumRec = recurring.reduce((a, r) => a.plus(r.amount), new Prisma.Decimal(0))
+    const sumExtra = receipts.reduce((a, r) => a.plus(r.amount), new Prisma.Decimal(0))
+    return json({ data: serialize({ month: { year, month }, recurring, extras: receipts, totals: { recurring: sumRec, extra: sumExtra, total: sumRec.plus(sumExtra) } }) })
+  }
+
   if(path==='audit'&&method==='GET'){const rows=await prisma.auditLog.findMany({where:{userId},orderBy:{createdAt:'desc'},take:100});return json({data:serialize(rows)})}
   throw new ApiError(404,'NOT_FOUND','Rota não encontrada.')
 }

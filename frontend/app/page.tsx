@@ -3,7 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { api, login, logout } from '../lib/api'
 import {
-  Banknote, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CreditCard,
+  Banknote, CalendarDays, Coins, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CreditCard,
   Download, Eye, EyeOff, HandCoins, History, LayoutDashboard, LockKeyhole, LogOut, Mail, Pencil, Plus,
   Receipt, RefreshCw, Search, Tags, Trash2, TrendingDown, Wallet,
 } from 'lucide-react'
@@ -12,12 +12,13 @@ import {
    Tipos e constantes
    ====================================================================== */
 type User = { id: string; name: string; email: string }
-type Section = 'dashboard' | 'calendar' | 'income' | 'receipts' | 'expenses' | 'debts' | 'payments' | 'categories' | 'audit'
+type Section = 'dashboard' | 'incoming' | 'calendar' | 'income' | 'receipts' | 'expenses' | 'debts' | 'payments' | 'categories' | 'audit'
 type FormType = 'income' | 'receipts' | 'expenses' | 'debts' | 'categories'
 type Row = any
 
 const SECTIONS: { id: Section; label: string; title: string; icon: any }[] = [
   { id: 'dashboard', label: 'Visão geral', title: 'Visão geral', icon: LayoutDashboard },
+  { id: 'incoming', label: 'Recebimentos do mês', title: 'Recebimentos do mês', icon: Coins },
   { id: 'calendar', label: 'Calendário', title: 'Calendário financeiro', icon: CalendarDays },
   { id: 'income', label: 'Rendas', title: 'Rendas mensais', icon: Wallet },
   { id: 'receipts', label: 'Entradas extras', title: 'Entradas extras', icon: HandCoins },
@@ -115,6 +116,7 @@ export default function Page() {
   const [ym, setYm] = useState({ year: now.getFullYear(), month: now.getMonth() + 1 })
   const [dash, setDash] = useState<Row | null>(null)
   const [events, setEvents] = useState<Row[]>([])
+  const [incoming, setIncoming] = useState<Row | null>(null)
   const [list, setList] = useState<{ section: string; data: Row[] }>({ section: '', data: [] })
   const [cats, setCats] = useState<Row[]>([])
   const [selectedDay, setSelectedDay] = useState<number | null>(null)
@@ -148,6 +150,7 @@ export default function Page() {
     if (!user) return
     try {
       if (section === 'dashboard') setDash((await api<any>(`dashboard?year=${ym.year}&month=${ym.month}`)).data)
+      else if (section === 'incoming') setIncoming((await api<any>(`incoming?year=${ym.year}&month=${ym.month}`)).data)
       else if (section === 'calendar') setEvents((await api<any>(`calendar?year=${ym.year}&month=${ym.month}`)).data)
       else setList({ section, data: (await api<any>(section)).data })
     } catch (e) { fail(e) }
@@ -230,11 +233,18 @@ export default function Page() {
     } catch (err: any) { setInstEdit(null); fail(err) } finally { setSaving(false) }
   }
 
+  function openReceiptForMonth() {
+    openModal('receipts')
+    const isCurrent = ym.year === now.getFullYear() && ym.month === now.getMonth() + 1
+    const day = isCurrent ? today() : `${ym.year}-${String(ym.month).padStart(2, '0')}-01`
+    setForm((f: Row) => ({ ...f, receivedAt: day }))
+  }
+
   const shiftMonth = (d: number) => setYm((p) => { const t = new Date(Date.UTC(p.year, p.month - 1 + d, 1)); return { year: t.getUTCFullYear(), month: t.getUTCMonth() + 1 } })
 
   /* ---------- dados derivados ---------- */
   const rows = list.section === section ? list.data : []
-  const listLoading = section !== 'dashboard' && section !== 'calendar' && list.section !== section
+  const listLoading = section !== 'dashboard' && section !== 'calendar' && section !== 'incoming' && list.section !== section
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return rows.filter((x) => (!q || rowName(x).toLowerCase().includes(q)) && (statusFilter === 'ALL' || x.status === statusFilter))
@@ -351,6 +361,41 @@ export default function Page() {
                 <div className="row-right"><b>{money(x.amount)}</b>{payButton('expense', x.id, x.description, x.amount)}</div>
               </div>
             )) : <p className="empty">Nenhuma despesa em aberto neste mês.</p>}
+          </article>
+        </div>
+      </>
+    )
+  }
+
+  const renderIncoming = () => {
+    const recurring: Row[] = incoming?.recurring ?? []
+    const extras: Row[] = incoming?.extras ?? []
+    return (
+      <>
+        <div className="cards three" style={{ marginTop: 0 }}>
+          <article className="metric highlight"><span>TOTAL DO MÊS</span><strong className="balance">{money(incoming?.totals?.total)}</strong><small>Rendas fixas + entradas extras</small></article>
+          <article className="metric"><span>RENDAS FIXAS</span><strong className="income">{money(incoming?.totals?.recurring)}</strong><small>{recurring.length} lançamento(s)</small></article>
+          <article className="metric"><span>ENTRADAS EXTRAS</span><strong className="income">{money(incoming?.totals?.extra)}</strong><small>{extras.length} lançamento(s)</small></article>
+        </div>
+        <div className="grid-two">
+          <article className="panel">
+            <div className="panel-title"><div><span>TODO MÊS</span><h3>Rendas fixas</h3></div><Wallet size={20} /></div>
+            {recurring.length ? recurring.map((x) => (
+              <div className="list-row" key={x.id}>
+                <div><strong>{x.description}</strong><small>Cai em {fmtDate(x.occursOn)} • {RECURRENCE_LABEL[x.recurrence] ?? x.recurrence}</small></div>
+                <div className="row-right"><b>{money(x.amount)}</b>{editDelete('income', x)}</div>
+              </div>
+            )) : <p className="empty">Nenhuma renda fixa neste mês.</p>}
+            <p className="empty" style={{ paddingBottom: 0, fontSize: 12 }}>Editar uma renda fixa altera o valor em todos os meses. Para algo só deste mês, use “Registrar recebimento”.</p>
+          </article>
+          <article className="panel">
+            <div className="panel-title"><div><span>SÓ DESTE MÊS</span><h3>Recebimentos avulsos</h3></div><HandCoins size={20} /></div>
+            {extras.length ? extras.map((x) => (
+              <div className="list-row" key={x.id}>
+                <div><strong>{x.description}</strong><small>{fmtDate(x.receivedAt)} • {x.category?.name ?? 'Sem categoria'}</small></div>
+                <div className="row-right"><b>{money(x.amount)}</b>{editDelete('receipts', x)}</div>
+              </div>
+            )) : <p className="empty">Nenhum recebimento avulso neste mês.</p>}
           </article>
         </div>
       </>
@@ -555,7 +600,8 @@ export default function Page() {
         <header className="topbar">
           <div><span className="eyebrow">PAINEL FINANCEIRO</span><h2>{current.title}</h2></div>
           <div className="topbar-actions">
-            {(section === 'dashboard' || section === 'calendar') && monthNav}
+            {(section === 'dashboard' || section === 'calendar' || section === 'incoming') && monthNav}
+            {section === 'incoming' && <><button className="btn" onClick={() => openModal('income')}><Plus size={16} /> Nova renda fixa</button><button className="primary" onClick={() => openReceiptForMonth()}><Plus size={17} /> Registrar recebimento</button></>}
             {section === 'dashboard' && <button className="primary" onClick={() => openModal('expenses')}><Plus size={17} /> Nova despesa</button>}
             {canAdd && <button className="primary" onClick={() => openModal(section as FormType)}><Plus size={17} /> Adicionar</button>}
             <button className="refresh" onClick={refreshAll}><RefreshCw size={16} /> Atualizar</button>
@@ -564,7 +610,7 @@ export default function Page() {
 
         {error && <div className="error-box"><span>{error}</span><button onClick={() => setError('')} aria-label="Fechar">×</button></div>}
 
-        {section === 'dashboard' ? renderDashboard() : section === 'calendar' ? renderCalendar() : renderList()}
+        {section === 'dashboard' ? renderDashboard() : section === 'incoming' ? renderIncoming() : section === 'calendar' ? renderCalendar() : renderList()}
       </section>
 
       {modal && (
