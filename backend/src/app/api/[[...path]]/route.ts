@@ -94,6 +94,42 @@ async function handle(req: NextRequest, parts: string[]) {
     if(method==='DELETE'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null}});assertOwnership(old,userId);await prisma.debt.update({where:{id},data:{deletedAt:new Date(),deletedBy:userId,status:'CANCELLED'}});return json({ok:true})}
   }
 
+  if (parts[0] === 'installments' && parts.length === 2 && method === 'PATCH') {
+    const id = parts[1]
+    const b = await readJson(req)
+    const old = await prisma.debtInstallment.findFirst({ where: { id, debt: { userId, deletedAt: null } }, include: { debt: true } })
+    if (!old) throw new ApiError(404, 'NOT_FOUND', 'Parcela não encontrada.')
+    if (old.status === 'CANCELLED') throw new ApiError(400, 'VALIDATION_ERROR', 'Parcela cancelada não pode ser editada.')
+    const data: any = {}
+    if (b.amount !== undefined) data.amount = toMoneyString(toDecimal(requiredNumber(b, 'amount', 0.01)))
+    if (b.notes !== undefined) data.notes = optionalString(b, 'notes', 500)
+    if (b.status !== undefined) {
+      if (b.status !== 'PAID' && b.status !== 'PENDING') throw new ApiError(400, 'VALIDATION_ERROR', 'status inválido.')
+      if (b.status === 'PAID') { data.status = 'PAID'; data.paidAt = b.paidAt ? requiredDate(b, 'paidAt') : (old.paidAt ?? new Date()) }
+      else { data.status = 'PENDING'; data.paidAt = null }
+    }
+    const method2 = ['PIX', 'DINHEIRO', 'CARTAO', 'TRANSFERENCIA', 'OUTRO'].includes(String(b.method)) ? (b.method as any) : 'OUTRO'
+    const updated = await prisma.$transaction(async (tx) => {
+      const inst = await tx.debtInstallment.update({ where: { id }, data })
+      const payments = await tx.payment.findMany({ where: { installmentId: id, userId, deletedAt: null } })
+      if (inst.status === 'PAID') {
+        const paidAt = inst.paidAt ?? new Date()
+        if (payments.length === 0) await tx.payment.create({ data: { userId, amount: inst.amount, paidAt, description: `${old.debt.description} — parcela ${inst.installmentNumber}/${old.debt.installmentCount}`, source: 'INSTALLMENT', method: method2, installmentId: id, debtId: inst.debtId } })
+        else await tx.payment.update({ where: { id: payments[0].id }, data: { amount: inst.amount, paidAt } })
+      } else if (payments.length) {
+        await tx.payment.updateMany({ where: { installmentId: id, userId, deletedAt: null }, data: { deletedAt: new Date(), deletedBy: userId } })
+      }
+      // recalcula a dívida a partir das parcelas (o servidor é a fonte da verdade)
+      const all = (await tx.debtInstallment.findMany({ where: { debtId: inst.debtId } })).filter((x) => x.status !== 'CANCELLED')
+      const total = all.reduce((a, x) => a.plus(x.amount), new Prisma.Decimal(0))
+      const paid = all.filter((x) => x.status === 'PAID').reduce((a, x) => a.plus(x.amount), new Prisma.Decimal(0))
+      await tx.debt.update({ where: { id: inst.debtId }, data: { totalAmount: total, interestAmount: total.minus(old.debt.originalAmount), paidAmount: paid, status: old.debt.status === 'CANCELLED' ? 'CANCELLED' : paid.gte(total) ? 'PAID' : 'ACTIVE' } })
+      return inst
+    })
+    await audit({ userId, action: 'UPDATE', tableName: 'debt_installments', recordId: id, oldData: old, newData: updated, ipAddress: ip })
+    return json({ data: serialize(updated) })
+  }
+
   if(path==='installments'&&method==='GET'){const rows=await prisma.debtInstallment.findMany({where:{debt:{userId,deletedAt:null}},include:{debt:true},orderBy:{dueDate:'asc'}});return json({data:serialize(rows)})}
 
   if(path==='payments'){

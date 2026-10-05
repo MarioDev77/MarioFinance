@@ -230,6 +230,7 @@ model DebtInstallment {
   dueDate           DateTime
   paidAt            DateTime?
   status            InstallmentStatus @default(PENDING)
+  notes             String?
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 

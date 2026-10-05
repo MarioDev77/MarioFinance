@@ -37,7 +37,7 @@ const METHOD_LABEL: Record<string, string> = { PIX: 'Pix', DINHEIRO: 'Dinheiro',
 const ACTION_LABEL: Record<string, string> = { CREATE: 'Criou', UPDATE: 'Editou', DELETE: 'Excluiu', RESTORE: 'Restaurou', LOGIN: 'Entrou no sistema', LOGOUT: 'Saiu do sistema', PAYMENT: 'Registrou pagamento' }
 const TABLE_LABEL: Record<string, string> = {
   monthlyIncome: 'renda', receipt: 'entrada extra', expense: 'despesa', debts: 'dívida',
-  payments: 'pagamento', categories: 'categoria', users: 'usuário', sessions: 'sessão',
+  payments: 'pagamento', categories: 'categoria', users: 'usuário', sessions: 'sessão', debt_installments: 'parcela',
 }
 const EVENT_LABEL: Record<string, string> = { INCOME: 'Renda', RECEIPT: 'Entrada', EXPENSE: 'Despesa', INSTALLMENT: 'Parcela' }
 const WEEKDAYS = ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB']
@@ -129,6 +129,8 @@ export default function Page() {
   const [payForm, setPayForm] = useState({ amount: '', method: 'PIX', paidAt: today() })
   const [confirmDel, setConfirmDel] = useState<{ type: FormType; id: string; label: string } | null>(null)
   const [saving, setSaving] = useState(false)
+  const [instEdit, setInstEdit] = useState<{ debt: Row; inst: Row } | null>(null)
+  const [instForm, setInstForm] = useState({ amount: '', status: 'PENDING', paidAt: today(), method: 'PIX', notes: '' })
 
   const fail = useCallback((e: any) => {
     if (e?.status === 401) { setUser(null); setError('Sua sessão expirou. Entre novamente.') }
@@ -207,6 +209,25 @@ export default function Page() {
       }) })
       setPay(null); notify('Pagamento registrado.'); await refreshAll()
     } catch (err: any) { setPay(null); fail(err) } finally { setSaving(false) }
+  }
+
+  function openInstEdit(debt: Row, inst: Row) {
+    setError('')
+    setInstForm({ amount: String(inst.amount), status: inst.status === 'PAID' ? 'PAID' : 'PENDING', paidAt: isoDay(inst.paidAt) || today(), method: 'PIX', notes: inst.notes ?? '' })
+    setInstEdit({ debt, inst })
+  }
+
+  async function saveInst(e: FormEvent) {
+    e.preventDefault()
+    if (!instEdit) return
+    setSaving(true)
+    try {
+      await api(`installments/${instEdit.inst.id}`, { method: 'PATCH', body: JSON.stringify({
+        amount: Number(instForm.amount), status: instForm.status, notes: instForm.notes,
+        ...(instForm.status === 'PAID' ? { paidAt: instForm.paidAt, method: instForm.method } : {}),
+      }) })
+      setInstEdit(null); notify('Parcela atualizada.'); await refreshAll()
+    } catch (err: any) { setInstEdit(null); fail(err) } finally { setSaving(false) }
   }
 
   const shiftMonth = (d: number) => setYm((p) => { const t = new Date(Date.UTC(p.year, p.month - 1 + d, 1)); return { year: t.getUTCFullYear(), month: t.getUTCMonth() + 1 } })
@@ -385,12 +406,14 @@ export default function Page() {
     const total = Number(x.totalAmount), paid = Number(x.paidAmount)
     const pct = total ? Math.min(100, (paid / total) * 100) : 0
     const open = openDebt === x.id
+    const parcels: Row[] = x.installments ?? []
+    const sameAmount = parcels.every((i) => Number(i.amount) === Number(parcels[0]?.amount))
     return (
       <div className="debt-card" key={x.id}>
         <div className="debt-head">
           <div onClick={() => setOpenDebt(open ? null : x.id)}>
             <strong>{x.description}</strong>
-            <small>{x.installmentCount}x de {money(x.installmentAmount)} • 1º vencimento {fmtDate(x.firstDueDate)} • <span className={`badge ${badgeClass(x.status)}`}>{STATUS_LABEL[x.status]}</span></small>
+            <small>{sameAmount ? `${x.installmentCount}x de ${money(x.installmentAmount)}` : `${x.installmentCount} parcelas`} • 1º vencimento {fmtDate(x.firstDueDate)} • <span className={`badge ${badgeClass(x.status)}`}>{STATUS_LABEL[x.status]}</span></small>
           </div>
           <div className="row-right"><b>{money(x.totalAmount)}</b><button className="icon-btn" title="Ver parcelas" onClick={() => setOpenDebt(open ? null : x.id)}>{open ? <ChevronUp size={17} /> : <ChevronDown size={17} />}</button>{editDelete('debts', x)}</div>
         </div>
@@ -400,8 +423,9 @@ export default function Page() {
           <div className="installments">
             {(x.installments ?? []).map((i: Row) => (
               <div className="inst-row" key={i.id}>
-                <span>Parcela {i.installmentNumber}/{x.installmentCount} <small>• vence {fmtDate(i.dueDate)}</small></span>
-                <span className="row-right"><b>{money(i.amount)}</b><span className={`badge ${badgeClass(i.status)}`}>{STATUS_LABEL[i.status]}</span>{i.status !== 'PAID' && i.status !== 'CANCELLED' && payButton('installment', i.id, `${x.description} — parcela ${i.installmentNumber}/${x.installmentCount}`, i.amount)}</span>
+                <span>Parcela {i.installmentNumber}/{x.installmentCount} <small>• vence {fmtDate(i.dueDate)}{i.status === 'PAID' && i.paidAt ? ` • pago em ${fmtDate(i.paidAt)}` : ''}</small></span>
+                <span className="row-right"><b>{money(i.amount)}</b><span className={`badge ${badgeClass(i.status)}`}>{STATUS_LABEL[i.status]}</span>{i.status !== 'PAID' && i.status !== 'CANCELLED' && payButton('installment', i.id, `${x.description} — parcela ${i.installmentNumber}/${x.installmentCount}`, i.amount)}{i.status !== 'CANCELLED' && <button className="icon-btn" title="Editar parcela" onClick={() => openInstEdit(x, i)}><Pencil size={16} /></button>}</span>
+                {i.notes && <span className="inst-note">{i.notes}</span>}
               </div>
             ))}
           </div>
@@ -562,6 +586,23 @@ export default function Page() {
             <label>Forma de pagamento<select value={payForm.method} onChange={(e) => setPayForm({ ...payForm, method: e.target.value })}>{Object.entries(METHOD_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
             <label>Data do pagamento<input type="date" value={payForm.paidAt} onChange={(e) => setPayForm({ ...payForm, paidAt: e.target.value })} required /></label>
             <button className="login-button" disabled={saving}>{saving ? 'Registrando...' : <><CheckCircle2 size={17} /> Confirmar pagamento</>}</button>
+          </form>
+        </div>
+      )}
+
+      {instEdit && (
+        <div className="modal-backdrop" onMouseDown={(e) => e.currentTarget === e.target && setInstEdit(null)}>
+          <form className="modal" onSubmit={saveInst}>
+            <div className="modal-head"><div><span>EDITAR PARCELA</span><h3>{instEdit.debt.description} — {instEdit.inst.installmentNumber}/{instEdit.debt.installmentCount}</h3></div><button type="button" onClick={() => setInstEdit(null)}>×</button></div>
+            <label>Valor da parcela<input type="number" step="0.01" min="0.01" value={instForm.amount} onChange={(e) => setInstForm({ ...instForm, amount: e.target.value })} required /></label>
+            <label>Situação<select value={instForm.status} onChange={(e) => setInstForm({ ...instForm, status: e.target.value })}><option value="PENDING">Pendente</option><option value="PAID">Paga</option></select></label>
+            {instForm.status === 'PAID' && <>
+              <label>Data do pagamento<input type="date" value={instForm.paidAt} onChange={(e) => setInstForm({ ...instForm, paidAt: e.target.value })} required /></label>
+              <label>Forma de pagamento<select value={instForm.method} onChange={(e) => setInstForm({ ...instForm, method: e.target.value })}>{Object.entries(METHOD_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+            </>}
+            <label>Descrição<textarea maxLength={500} placeholder="Ex.: paga com o 13º, negociado desconto…" value={instForm.notes} onChange={(e) => setInstForm({ ...instForm, notes: e.target.value })} /></label>
+            <p className="hint">O total e o valor pago da dívida são recalculados automaticamente.</p>
+            <button className="login-button" disabled={saving}>{saving ? 'Salvando...' : <><CheckCircle2 size={17} /> Salvar parcela</>}</button>
           </form>
         </div>
       )}
