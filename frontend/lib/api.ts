@@ -10,7 +10,7 @@ export async function api<T=any>(path: string, options: RequestInit = {}): Promi
   if (options.method && !['GET','HEAD'].includes(options.method.toUpperCase()) && csrfToken) headers.set('X-CSRF-Token', csrfToken)
   const response = await fetch(`${API_URL}/api/${path.replace(/^\//,'')}`, { ...options, headers, credentials:'include', cache:'no-store' })
   const payload = await response.json().catch(()=>({}))
-  if (!response.ok) { const err: any = new Error(payload?.error?.message || 'Não foi possível concluir a operação.'); err.status = response.status; throw err }
+  if (!response.ok) { const base = payload?.error?.message || 'Não foi possível concluir a operação.'; const err: any = new Error(response.status === 404 ? `${base} (${path.split('?')[0]} — o backend publicado pode estar desatualizado; abra ${API_URL}/api/health)` : base); err.status = response.status; throw err }
   if (payload?.csrfToken) setCsrfToken(payload.csrfToken)
   return payload
 }

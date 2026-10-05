@@ -28,7 +28,7 @@ async function handle(req: NextRequest, parts: string[]) {
   const path = parts.join('/')
   const method = req.method
 
-  if (path === 'health' && method === 'GET') return json({ ok: true, build: 'routes-fix-2026-10-05' })
+  if (path === 'health' && method === 'GET') return json({ ok: true, build: 'routes-fix-2026-10-05-b', routes: ['dashboard', 'incoming', 'calendar', 'income', 'receipts', 'expenses', 'debts', 'installments', 'payments', 'categories', 'audit'] })
 
   if (path === 'auth/login' && method === 'POST') {
     const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null

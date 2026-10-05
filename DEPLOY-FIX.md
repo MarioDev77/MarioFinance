@@ -44,3 +44,13 @@ NEXT_PUBLIC_API_URL=https://seu-backend.exemplo.com
 - `401 /api/auth/me` antes do login: normal.
 - `500 /api/auth/login`: indicava configuração do backend; com esta versão, uma `SESSION_SECRET` ausente/inválida aparece como erro de configuração.
 - O script antigo do Vercel Analytics foi removido desta versão para evitar o `404` mostrado no console quando o script não está disponível no deploy atual.
+
+## Erro "Rota não encontrada." (404) em Recebimentos do mês
+
+Significa que o backend publicado é mais antigo que o frontend e não tem a rota `incoming`.
+
+1. Abra `https://SEU-BACKEND/api/health`. A versão correta responde `build: "routes-fix-2026-10-05-b"` e uma lista `routes` contendo `incoming`.
+2. Se não responder isso, faça redeploy do backend (Railway):
+   - o serviço deve apontar para o repositório/branch atual, com **Root Directory = `backend`**;
+   - faça o commit e push desta versão e use *Redeploy* sem cache.
+3. Confira `NEXT_PUBLIC_API_URL` no frontend (Vercel): URL do backend, sem `/api` no final. Depois de alterar, faça novo deploy do frontend.
