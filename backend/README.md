@@ -31,10 +31,13 @@ Sistema de gestão financeira pessoal com **uma única conta**, frontend separad
 - Login real conectado à API.
 - Dashboard conectado ao banco.
 - Cadastro de rendas, entradas extras, despesas e dívidas.
-- Listagem e exclusão dos registros.
+- Listagem, edição e exclusão dos registros.
+- Calendário, categorias, histórico de pagamentos e atividades.
+- Pagamento de despesas e parcelas direto pelo painel.
+- Busca, filtros por status e exportação CSV.
 - Visualização das próximas parcelas e despesas.
 - Cliente HTTP centralizado em `frontend/lib/api.ts`.
-- Interface responsiva e sem a antiga identidade da Granja Oliveira.
+- Interface responsiva em azul, azul-escuro/preto e branco.
 
 ## Estrutura
 

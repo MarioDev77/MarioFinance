@@ -1,35 +1,23 @@
 # MarioFin
 
-Sistema de gestão financeira pessoal.
+Sistema de gestão financeira pessoal (conta única).
 
 ## Estrutura
 
-- `frontend/` — Next.js + React + TypeScript
-- `backend/` — base do backend/API + Prisma + PostgreSQL
+- `frontend/` — Next.js + React + TypeScript (painel em azul, azul-escuro/preto e branco)
+- `backend/` — API (Next.js route handlers) + Prisma + PostgreSQL
 
-## Estado desta organização
+## Funcionalidades do painel
 
-Esta versão organiza o material existente no ZIP e remove o material temporário da Granja Oliveira.
-Ela **não inventa as APIs ausentes**. O backend enviado ainda precisa da implementação das rotas `/api`, além dos módulos auxiliares importados por `session.ts`.
+- Visão geral por mês (navegação entre meses): saldo previsto, entradas, despesas, parcelas, pago, pendente e atrasado
+- Gráficos de entradas × saídas e de despesas por categoria
+- Calendário financeiro mensal, com pagamento direto pelos eventos
+- Rendas, entradas extras, despesas e dívidas com criação, edição e exclusão
+- Registro de pagamento de despesas e parcelas (forma de pagamento e data)
+- Parcelas de cada dívida com barra de progresso
+- Busca, filtro por status e exportação CSV nas listas
+- Categorias, histórico de pagamentos e atividades recentes
 
-### Backend ainda necessário para ficar executável
+## Como executar
 
-- `src/lib/prisma.ts`
-- `src/lib/http.ts`
-- `src/lib/crypto.ts`
-- `src/lib/password.ts`
-- `src/lib/schemas.ts`
-- `src/lib/rate-limit.ts`
-- `src/lib/audit.ts`
-- `src/lib/overdue.ts`
-- rotas `/api/auth/*`
-- rotas de receitas, despesas, dívidas, parcelas, pagamentos, dashboard e calendário
-- `package.json`, `tsconfig.json` e configuração de execução do backend
-
-## Banco
-
-O schema Prisma foi colocado em `backend/prisma/schema.prisma`.
-
-## Próximo passo
-
-Implementar o backend/API e então conectar o frontend por uma camada única de API.
+Veja `backend/README.md` (variáveis, banco e comandos) e `DEPLOY-FIX.md` (deploy: Railway + Vercel).
