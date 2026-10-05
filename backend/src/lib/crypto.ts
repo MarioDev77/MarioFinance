@@ -2,7 +2,8 @@ import crypto from 'node:crypto'
 
 function secret() {
   const value = process.env.SESSION_SECRET
-  if (!value || value.length < 32) throw new Error('SESSION_SECRET deve ter pelo menos 32 caracteres.')
+  if (!value) throw new Error('Configuração ausente: SESSION_SECRET não foi definida no ambiente do backend.')
+  if (value.length < 32) throw new Error('Configuração inválida: SESSION_SECRET deve ter pelo menos 32 caracteres.')
   return value
 }
 

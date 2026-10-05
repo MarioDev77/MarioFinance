@@ -9,7 +9,10 @@ export function json(data: unknown, init?: ResponseInit) {
 export function errorResponse(error: unknown) {
   if (error instanceof ApiError) return Response.json({ error: { code: error.code, message: error.message, details: error.details } }, { status: error.status })
   console.error(error)
-  return Response.json({ error: { code: 'INTERNAL_ERROR', message: 'Erro interno do servidor.' } }, { status: 500 })
+  const message = error instanceof Error && error.message.startsWith('Configuração')
+    ? error.message
+    : 'Erro interno do servidor.'
+  return Response.json({ error: { code: message === 'Erro interno do servidor.' ? 'INTERNAL_ERROR' : 'CONFIGURATION_ERROR', message } }, { status: message === 'Erro interno do servidor.' ? 500 : 503 })
 }
 
 export async function readJson(req: Request): Promise<Record<string, unknown>> {
