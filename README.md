@@ -33,4 +33,3 @@ O schema Prisma foi colocado em `backend/prisma/schema.prisma`.
 ## Próximo passo
 
 Implementar o backend/API e então conectar o frontend por uma camada única de API.
-# MarioFinance
