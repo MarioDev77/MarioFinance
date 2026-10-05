@@ -88,6 +88,7 @@ model User {
   debts       Debt[]
   payments    Payment[]
   categories  Category[]
+  auditLogs   AuditLog[]
 
   @@map("users")
 }
@@ -268,6 +269,7 @@ model Payment {
 model AuditLog {
   id        String      @id @default(uuid())
   userId    String?
+  user      User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
   action    AuditAction
   tableName String
   recordId  String
