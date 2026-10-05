@@ -28,6 +28,8 @@ async function handle(req: NextRequest, parts: string[]) {
   const path = parts.join('/')
   const method = req.method
 
+  if (path === 'health' && method === 'GET') return json({ ok: true, build: 'routes-fix-2026-10-05' })
+
   if (path === 'auth/login' && method === 'POST') {
     const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null
     if (!rateLimit(`login:${ip ?? 'unknown'}`, 8, 60_000)) throw new ApiError(429, 'RATE_LIMITED', 'Muitas tentativas. Tente novamente em instantes.')
