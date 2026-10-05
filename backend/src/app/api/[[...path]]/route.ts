@@ -28,7 +28,7 @@ async function handle(req: NextRequest, parts: string[]) {
   const path = parts.join('/')
   const method = req.method
 
-  if (path === 'health' && method === 'GET') return json({ ok: true, build: 'multi-schedule-2026-10-05', routes: ['dashboard', 'incoming', 'calendar', 'income', 'receipts', 'expenses', 'debts', 'installments', 'payments', 'categories', 'audit'] })
+  if (path === 'health' && method === 'GET') return json({ ok: true, build: 'my-share-2026-10-05', routes: ['dashboard', 'incoming', 'calendar', 'income', 'receipts', 'expenses', 'debts', 'installments', 'payments', 'categories', 'audit'] })
 
   if (path === 'auth/login' && method === 'POST') {
     const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null
@@ -115,7 +115,24 @@ async function handle(req: NextRequest, parts: string[]) {
       return json({data:serialize(await prisma.debt.findUnique({where:{id:debt.id},include:{installments:true}}))},{status:201})
       }
       const original=toDecimal(requiredNumber(b,'originalAmount',0.01));const interest=toDecimal(Number(b.interestAmount??0));const total=original.plus(interest);const count=Math.floor(requiredNumber(b,'installmentCount',1));const first=requiredDate(b,'firstDueDate');const plan=generateInstallmentPlan(total,count,first);const debt=await prisma.$transaction(async tx=>{const d=await tx.debt.create({data:{userId,description:requiredString(b,'description'),originalAmount:original.toFixed(2),interestAmount:interest.toFixed(2),totalAmount:total.toFixed(2),installmentCount:count,installmentAmount:plan[0].amount.toFixed(2),firstDueDate:first,notes:optionalString(b,'notes')}});await tx.debtInstallment.createMany({data:plan.map(p=>({debtId:d.id,installmentNumber:p.installmentNumber,amount:p.amount.toFixed(2),dueDate:p.dueDate}))});return d});await audit({userId,action:'CREATE',tableName:'debts',recordId:debt.id,newData:debt,ipAddress:ip});return json({data:serialize(await prisma.debt.findUnique({where:{id:debt.id},include:{installments:true}}))},{status:201})}
-    if(method==='PATCH'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null},include:{installments:true}});assertOwnership(old,userId);const b=await readJson(req);const data:any={};if(b.description!==undefined)data.description=requiredString(b,'description');if(b.notes!==undefined)data.notes=optionalString(b,'notes');if(b.status!==undefined)data.status=b.status;const d=await prisma.debt.update({where:{id},data});await audit({userId,action:'UPDATE',tableName:'debts',recordId:id,oldData:old,newData:d,ipAddress:ip});return json({data:serialize(d)})}
+    if(method==='PATCH'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null},include:{installments:true}});assertOwnership(old,userId);const b=await readJson(req)
+      if(b.applyShare&&typeof b.applyShare==='object'){
+        const a=b.applyShare as any;const mode=a.mode==='FIXED'?'FIXED':a.mode==='CLEAR'?'CLEAR':'PERCENT';const value=Number(a.value);const scope=a.scope==='PENDING'?'PENDING':'ALL'
+        if(mode==='PERCENT'&&!(value>0&&value<=100))throw new ApiError(400,'VALIDATION_ERROR','Percentual inválido (1 a 100).')
+        if(mode==='FIXED'&&!(value>=0.01))throw new ApiError(400,'VALIDATION_ERROR','Valor da minha parte inválido.')
+        const targets=((old as any).installments as any[]).filter((i:any)=>i.status!=='CANCELLED'&&(scope==='ALL'||i.status!=='PAID'))
+        await prisma.$transaction(async tx=>{
+          for(const i of targets){
+            const amt=toDecimal(i.amount.toString())
+            let my:any=null
+            if(mode!=='CLEAR'){let m=mode==='PERCENT'?amt.times(value).dividedBy(100):toDecimal(value);if(m.gt(amt))m=amt;my=m.toDecimalPlaces(2).toFixed(2)}
+            await tx.debtInstallment.update({where:{id:i.id},data:{myAmount:my}})
+            if(i.status==='PAID')await tx.payment.updateMany({where:{installmentId:i.id,userId,deletedAt:null},data:{amount:my??amt.toFixed(2)}})
+          }})
+        await audit({userId,action:'UPDATE',tableName:'debts',recordId:id,oldData:{applyShare:null},newData:{applyShare:a},ipAddress:ip})
+        return json({data:serialize(await prisma.debt.findUnique({where:{id},include:{installments:{orderBy:{installmentNumber:'asc'}}}}))})
+      }
+      const data:any={};if(b.description!==undefined)data.description=requiredString(b,'description');if(b.notes!==undefined)data.notes=optionalString(b,'notes');if(b.status!==undefined)data.status=b.status;const d=await prisma.debt.update({where:{id},data});await audit({userId,action:'UPDATE',tableName:'debts',recordId:id,oldData:old,newData:d,ipAddress:ip});return json({data:serialize(d)})}
     if(method==='DELETE'){const id=paramsId(parts);const old=await prisma.debt.findFirst({where:{id,userId,deletedAt:null}});assertOwnership(old,userId);await prisma.$transaction([prisma.debt.update({where:{id},data:{deletedAt:new Date(),deletedBy:userId,status:'CANCELLED'}}),prisma.payment.updateMany({where:{debtId:id,userId,deletedAt:null},data:{deletedAt:new Date(),deletedBy:userId}})]);await audit({userId,action:'DELETE',tableName:'debts',recordId:id,oldData:old,ipAddress:ip});return json({ok:true})}
   }
 
@@ -128,6 +145,12 @@ async function handle(req: NextRequest, parts: string[]) {
     const data: any = {}
     if (b.amount !== undefined) data.amount = toMoneyString(toDecimal(requiredNumber(b, 'amount', 0.01)))
     if (b.notes !== undefined) data.notes = optionalString(b, 'notes', 500)
+    if (b.myAmount !== undefined) data.myAmount = (b.myAmount === null || b.myAmount === '') ? null : toMoneyString(toDecimal(requiredNumber(b, 'myAmount', 0.01)))
+    {
+      const newAmount = data.amount ?? old.amount.toString()
+      const newMy = data.myAmount !== undefined ? data.myAmount : old.myAmount
+      if (newMy != null && toDecimal(newMy.toString()).gt(toDecimal(newAmount.toString()))) throw new ApiError(400, 'VALIDATION_ERROR', 'Minha parte não pode ser maior que a parcela.')
+    }
     if (b.status !== undefined) {
       if (b.status !== 'PAID' && b.status !== 'PENDING') throw new ApiError(400, 'VALIDATION_ERROR', 'status inválido.')
       if (b.status === 'PAID') { data.status = 'PAID'; data.paidAt = b.paidAt ? requiredDate(b, 'paidAt') : (old.paidAt ?? new Date()) }
@@ -139,8 +162,8 @@ async function handle(req: NextRequest, parts: string[]) {
       const payments = await tx.payment.findMany({ where: { installmentId: id, userId, deletedAt: null } })
       if (inst.status === 'PAID') {
         const paidAt = inst.paidAt ?? new Date()
-        if (payments.length === 0) await tx.payment.create({ data: { userId, amount: inst.amount, paidAt, description: `${old.debt.description} — parcela ${inst.installmentNumber}/${old.debt.installmentCount}`, source: 'INSTALLMENT', method: method2, installmentId: id, debtId: inst.debtId } })
-        else await tx.payment.update({ where: { id: payments[0].id }, data: { amount: inst.amount, paidAt } })
+        if (payments.length === 0) await tx.payment.create({ data: { userId, amount: inst.myAmount ?? inst.amount, paidAt, description: `${old.debt.description} — parcela ${inst.installmentNumber}/${old.debt.installmentCount}`, source: 'INSTALLMENT', method: method2, installmentId: id, debtId: inst.debtId } })
+        else await tx.payment.update({ where: { id: payments[0].id }, data: { amount: inst.myAmount ?? inst.amount, paidAt } })
       } else if (payments.length) {
         await tx.payment.updateMany({ where: { installmentId: id, userId, deletedAt: null }, data: { deletedAt: new Date(), deletedBy: userId } })
       }
@@ -163,7 +186,7 @@ async function handle(req: NextRequest, parts: string[]) {
       const p=await prisma.$transaction(async tx=>{const payment=await tx.payment.create({data:{userId,amount:amount.toFixed(2),paidAt:b.paidAt?requiredDate(b,'paidAt'):new Date(),description:requiredString(b,'description'),source,method:methodP,expenseId,installmentId,debtId,notes:optionalString(b,'notes')}});if(expenseId)await tx.expense.update({where:{id:expenseId},data:{status:'PAID',paidAt:payment.paidAt}});if(installmentId){const inst=await tx.debtInstallment.update({where:{id:installmentId},data:{status:'PAID',paidAt:payment.paidAt}});const agg=await tx.debtInstallment.aggregate({where:{debtId:inst.debtId,status:'PAID'},_sum:{amount:true}});const debt=await tx.debt.findUnique({where:{id:inst.debtId}});const paid=agg._sum.amount??new Prisma.Decimal(0);if(debt)await tx.debt.update({where:{id:inst.debtId},data:{paidAmount:paid,status:paid.gte(debt.totalAmount)?'PAID':'ACTIVE'}})}return payment});await audit({userId,action:'PAYMENT',tableName:'payments',recordId:p.id,newData:p,ipAddress:ip});return json({data:serialize(p)},{status:201})}
   }
 
-  if(path==='calendar'&&method==='GET'){const u=new URL(req.url);const year=Number(u.searchParams.get('year')??new Date().getUTCFullYear());const month=Number(u.searchParams.get('month')??new Date().getUTCMonth()+1);const {start,end}=monthBoundsUTC(year,month);const [incomes,receipts,expenses,installments]=await Promise.all([prisma.monthlyIncome.findMany({where:{userId,deletedAt:null,status:'ACTIVE'}}),prisma.receipt.findMany({where:{userId,deletedAt:null,receivedAt:{gte:start,lt:end}}}),prisma.expense.findMany({where:{userId,deletedAt:null,OR:[{expenseDate:{gte:start,lt:end}},{dueDate:{gte:start,lt:end}}]}}),prisma.debtInstallment.findMany({where:{debt:{userId,deletedAt:null},dueDate:{gte:start,lt:end}},include:{debt:true}})]);const events:any[]=[];for(const i of incomes){const x=incomeOccursInMonth(i,year,month);if(x.occurs)events.push({type:'INCOME',date:x.date,description:i.description,amount:i.amount,status:i.status})}for(const r of receipts)events.push({type:'RECEIPT',date:r.receivedAt,description:r.description,amount:r.amount,status:'RECEIVED'});for(const e of expenses)events.push({type:'EXPENSE',date:e.dueDate??e.expenseDate,description:e.description,amount:e.amount,status:e.status,id:e.id});for(const i of installments)events.push({type:'INSTALLMENT',date:i.dueDate,description:`${i.debt.description} — parcela ${i.installmentNumber}/${i.debt.installmentCount}`,amount:i.amount,status:i.status,id:i.id});return json({data:serialize(events.sort((a,b)=>new Date(a.date).getTime()-new Date(b.date).getTime()))})}
+  if(path==='calendar'&&method==='GET'){const u=new URL(req.url);const year=Number(u.searchParams.get('year')??new Date().getUTCFullYear());const month=Number(u.searchParams.get('month')??new Date().getUTCMonth()+1);const {start,end}=monthBoundsUTC(year,month);const [incomes,receipts,expenses,installments]=await Promise.all([prisma.monthlyIncome.findMany({where:{userId,deletedAt:null,status:'ACTIVE'}}),prisma.receipt.findMany({where:{userId,deletedAt:null,receivedAt:{gte:start,lt:end}}}),prisma.expense.findMany({where:{userId,deletedAt:null,OR:[{expenseDate:{gte:start,lt:end}},{dueDate:{gte:start,lt:end}}]}}),prisma.debtInstallment.findMany({where:{debt:{userId,deletedAt:null},dueDate:{gte:start,lt:end}},include:{debt:true}})]);const events:any[]=[];for(const i of incomes){const x=incomeOccursInMonth(i,year,month);if(x.occurs)events.push({type:'INCOME',date:x.date,description:i.description,amount:i.amount,status:i.status})}for(const r of receipts)events.push({type:'RECEIPT',date:r.receivedAt,description:r.description,amount:r.amount,status:'RECEIVED'});for(const e of expenses)events.push({type:'EXPENSE',date:e.dueDate??e.expenseDate,description:e.description,amount:e.amount,status:e.status,id:e.id});for(const i of installments)events.push({type:'INSTALLMENT',date:i.dueDate,description:`${i.debt.description} — parcela ${i.installmentNumber}/${i.debt.installmentCount}`,amount:i.myAmount??i.amount,fullAmount:i.amount,status:i.status,id:i.id});return json({data:serialize(events.sort((a,b)=>new Date(a.date).getTime()-new Date(b.date).getTime()))})}
 
   if(path==='dashboard'&&method==='GET'){
     await markOverdue(userId)
@@ -182,7 +205,7 @@ async function handle(req: NextRequest, parts: string[]) {
     const sum=(rows:{amount:Prisma.Decimal}[])=>rows.reduce((a,r)=>a.plus(r.amount),zero())
     const extra=sum(receipts)
     const expActive=expenses.filter(x=>x.status!=='CANCELLED')
-    const instActive=installments.filter(x=>x.status!=='CANCELLED')
+    const instActive=installments.filter(x=>x.status!=='CANCELLED').map(x=>({...x,amount:x.myAmount??x.amount}))
     const exp=sum(expActive)
     const inst=sum(instActive.filter(x=>x.status!=='PAID'))
     const paid=sum(expActive.filter(x=>x.status==='PAID')).plus(sum(instActive.filter(x=>x.status==='PAID')))

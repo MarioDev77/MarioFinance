@@ -133,7 +133,9 @@ export default function Page() {
   const [confirmDel, setConfirmDel] = useState<{ type: FormType; id: string; label: string } | null>(null)
   const [saving, setSaving] = useState(false)
   const [instEdit, setInstEdit] = useState<{ debt: Row; inst: Row } | null>(null)
-  const [instForm, setInstForm] = useState({ amount: '', status: 'PENDING', paidAt: today(), method: 'PIX', notes: '' })
+  const [instForm, setInstForm] = useState({ amount: '', myAmount: '', status: 'PENDING', paidAt: today(), method: 'PIX', notes: '' })
+  const [share, setShare] = useState<Row | null>(null)
+  const [shareForm, setShareForm] = useState({ mode: 'PERCENT', value: '', scope: 'ALL' })
 
   const fail = useCallback((e: any) => {
     if (e?.status === 401) { setUser(null); setError('Sua sessão expirou. Entre novamente.') }
@@ -217,7 +219,7 @@ export default function Page() {
 
   function openInstEdit(debt: Row, inst: Row) {
     setError('')
-    setInstForm({ amount: String(inst.amount), status: inst.status === 'PAID' ? 'PAID' : 'PENDING', paidAt: isoDay(inst.paidAt) || today(), method: 'PIX', notes: inst.notes ?? '' })
+    setInstForm({ amount: String(inst.amount), myAmount: inst.myAmount != null ? String(inst.myAmount) : '', status: inst.status === 'PAID' ? 'PAID' : 'PENDING', paidAt: isoDay(inst.paidAt) || today(), method: 'PIX', notes: inst.notes ?? '' })
     setInstEdit({ debt, inst })
   }
 
@@ -227,11 +229,25 @@ export default function Page() {
     setSaving(true)
     try {
       await api(`installments/${instEdit.inst.id}`, { method: 'PATCH', body: JSON.stringify({
-        amount: Number(instForm.amount), status: instForm.status, notes: instForm.notes,
+        amount: Number(instForm.amount), myAmount: instForm.myAmount === '' ? null : Number(instForm.myAmount), status: instForm.status, notes: instForm.notes,
         ...(instForm.status === 'PAID' ? { paidAt: instForm.paidAt, method: instForm.method } : {}),
       }) })
       setInstEdit(null); notify('Parcela atualizada.'); await refreshAll()
     } catch (err: any) { setInstEdit(null); fail(err) } finally { setSaving(false) }
+  }
+
+  function openShare(debt: Row) {
+    setError(''); setShareForm({ mode: 'PERCENT', value: '', scope: 'ALL' }); setShare(debt)
+  }
+
+  async function saveShare(e: FormEvent) {
+    e.preventDefault()
+    if (!share) return
+    setSaving(true)
+    try {
+      await api(`debts/${share.id}`, { method: 'PATCH', body: JSON.stringify({ applyShare: { mode: shareForm.mode, value: Number(shareForm.value || 0), scope: shareForm.scope } }) })
+      setShare(null); notify(shareForm.mode === 'CLEAR' ? 'Minha parte removida.' : 'Minha parte aplicada às parcelas.'); await refreshAll()
+    } catch (err: any) { setShare(null); fail(err) } finally { setSaving(false) }
   }
 
   function openReceiptForMonth() {
@@ -350,7 +366,7 @@ export default function Page() {
             {dash?.upcomingInstallments?.length ? dash.upcomingInstallments.map((x: Row) => (
               <div className="list-row" key={x.id}>
                 <div><strong>{x.debt?.description}</strong><small>Parcela {x.installmentNumber}/{x.debt?.installmentCount} • {fmtDate(x.dueDate)} • <span className={`badge ${badgeClass(x.status)}`}>{STATUS_LABEL[x.status]}</span></small></div>
-                <div className="row-right"><b>{money(x.amount)}</b>{payButton('installment', x.id, `${x.debt?.description} — parcela ${x.installmentNumber}/${x.debt?.installmentCount}`, x.amount)}</div>
+                <div className="row-right"><b>{money(x.myAmount ?? x.amount)}</b>{payButton('installment', x.id, `${x.debt?.description} — parcela ${x.installmentNumber}/${x.debt?.installmentCount}`, x.myAmount ?? x.amount)}</div>
               </div>
             )) : <p className="empty">Nenhuma parcela em aberto neste mês.</p>}
           </article>
@@ -456,6 +472,11 @@ export default function Page() {
     const sameAmount = parcels.every((i) => Number(i.amount) === Number(parcels[0]?.amount))
     const perMonth: Record<string, number> = {}
     parcels.forEach((i) => { const k = String(i.dueDate).slice(0, 7); perMonth[k] = (perMonth[k] ?? 0) + 1 })
+    const hasShare = parcels.some((i) => i.myAmount != null)
+    const live = parcels.filter((i) => i.status !== 'CANCELLED')
+    const mine = (i: Row) => Number(i.myAmount ?? i.amount)
+    const myTotal = live.reduce((a, i) => a + mine(i), 0)
+    const myPaid = live.filter((i) => i.status === 'PAID').reduce((a, i) => a + mine(i), 0)
     const multiDate = Object.values(perMonth).some((n) => n > 1)
     const groups = new Map<string, { amount: number; count: number; day: number }>()
     if (multiDate) [...parcels].sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate))).forEach((i) => { const k = String(Number(i.amount)); const g = groups.get(k); if (g) g.count++; else groups.set(k, { amount: Number(i.amount), count: 1, day: Number(String(i.dueDate).slice(8, 10)) }) })
@@ -467,16 +488,17 @@ export default function Page() {
             <strong>{x.description}</strong>
             <small>{summary} • 1º vencimento {fmtDate(x.firstDueDate)} • <span className={`badge ${badgeClass(x.status)}`}>{STATUS_LABEL[x.status]}</span></small>
           </div>
-          <div className="row-right"><b>{money(x.totalAmount)}</b><button className="icon-btn" title="Ver parcelas" onClick={() => setOpenDebt(open ? null : x.id)}>{open ? <ChevronUp size={17} /> : <ChevronDown size={17} />}</button>{editDelete('debts', x)}</div>
+          <div className="row-right"><b>{money(x.totalAmount)}</b><button className="icon-btn" title="Definir minha parte das parcelas" onClick={() => openShare(x)}><HandCoins size={17} /></button><button className="icon-btn" title="Ver parcelas" onClick={() => setOpenDebt(open ? null : x.id)}>{open ? <ChevronUp size={17} /> : <ChevronDown size={17} />}</button>{editDelete('debts', x)}</div>
         </div>
         <div className="progress"><i style={{ width: `${pct}%` }} /></div>
         <small style={{ color: 'var(--muted)', fontSize: 12 }}>Pago {money(paid)} de {money(total)} • restam {money(total - paid)}</small>
+        {hasShare && <small style={{ color: 'var(--text-soft)', fontSize: 12, display: 'block', marginTop: 4 }}>Minha parte: paguei {money(myPaid)} de {money(myTotal)} • restam {money(myTotal - myPaid)}</small>}
         {open && (
           <div className="installments">
             {(x.installments ?? []).map((i: Row) => (
-              <div className="inst-row" key={i.id}>
+              <div className="inst-row clickable" key={i.id} title="Clique para editar a parcela" onClick={() => i.status !== 'CANCELLED' && openInstEdit(x, i)}>
                 <span>Parcela {i.installmentNumber}/{x.installmentCount} <small>• vence {fmtDate(i.dueDate)}{i.status === 'PAID' && i.paidAt ? ` • pago em ${fmtDate(i.paidAt)}` : ''}</small></span>
-                <span className="row-right"><b>{money(i.amount)}</b><span className={`badge ${badgeClass(i.status)}`}>{STATUS_LABEL[i.status]}</span>{i.status !== 'PAID' && i.status !== 'CANCELLED' && payButton('installment', i.id, `${x.description} — parcela ${i.installmentNumber}/${x.installmentCount}`, i.amount)}{i.status !== 'CANCELLED' && <button className="icon-btn" title="Editar parcela" onClick={() => openInstEdit(x, i)}><Pencil size={16} /></button>}</span>
+                <span className="row-right" onClick={(e) => e.stopPropagation()}>{i.myAmount != null && <small className="my-share">minha parte <b>{money(i.myAmount)}</b> de</small>}<b>{money(i.amount)}</b><span className={`badge ${badgeClass(i.status)}`}>{STATUS_LABEL[i.status]}</span>{i.status !== 'PAID' && i.status !== 'CANCELLED' && payButton('installment', i.id, `${x.description} — parcela ${i.installmentNumber}/${x.installmentCount}`, i.myAmount ?? i.amount)}{i.status !== 'CANCELLED' && <button className="icon-btn" title="Editar parcela" onClick={() => openInstEdit(x, i)}><Pencil size={16} /></button>}</span>
                 {i.notes && <span className="inst-note">{i.notes}</span>}
               </div>
             ))}
@@ -664,11 +686,26 @@ export default function Page() {
         </div>
       )}
 
+      {share && (
+        <div className="modal-backdrop" onMouseDown={(e) => e.currentTarget === e.target && setShare(null)}>
+          <form className="modal" onSubmit={saveShare}>
+            <div className="modal-head"><div><span>MINHA PARTE</span><h3>{share.description}</h3></div><button type="button" onClick={() => setShare(null)}>×</button></div>
+            <p className="hint">Define quanto de cada parcela é seu. O painel, o calendário e os pagamentos passam a usar a sua parte. Depois você ainda pode ajustar parcela por parcela clicando nela.</p>
+            <label>Como definir<select value={shareForm.mode} onChange={(e) => setShareForm({ ...shareForm, mode: e.target.value })}><option value="PERCENT">Percentual de cada parcela</option><option value="FIXED">Valor fixo em cada parcela</option><option value="CLEAR">Remover (parcela inteira)</option></select></label>
+            {shareForm.mode !== 'CLEAR' && <label>{shareForm.mode === 'PERCENT' ? 'Minha parte (%)' : 'Minha parte (R$)'}<input type="number" step="0.01" min="0.01" max={shareForm.mode === 'PERCENT' ? '100' : undefined} value={shareForm.value} onChange={(e) => setShareForm({ ...shareForm, value: e.target.value })} required /></label>}
+            <label>Aplicar em<select value={shareForm.scope} onChange={(e) => setShareForm({ ...shareForm, scope: e.target.value })}><option value="ALL">Todas as parcelas</option><option value="PENDING">Só as não pagas</option></select></label>
+            <button className="login-button" disabled={saving}>{saving ? 'Salvando...' : <><CheckCircle2 size={17} /> Aplicar</>}</button>
+          </form>
+        </div>
+      )}
+
       {instEdit && (
         <div className="modal-backdrop" onMouseDown={(e) => e.currentTarget === e.target && setInstEdit(null)}>
           <form className="modal" onSubmit={saveInst}>
             <div className="modal-head"><div><span>EDITAR PARCELA</span><h3>{instEdit.debt.description} — {instEdit.inst.installmentNumber}/{instEdit.debt.installmentCount}</h3></div><button type="button" onClick={() => setInstEdit(null)}>×</button></div>
             <label>Valor da parcela<input type="number" step="0.01" min="0.01" value={instForm.amount} onChange={(e) => setInstForm({ ...instForm, amount: e.target.value })} required /></label>
+            <label>Minha parte da parcela (R$)<input type="number" step="0.01" min="0.01" max={instForm.amount || undefined} placeholder="Vazio = parcela inteira" value={instForm.myAmount} onChange={(e) => setInstForm({ ...instForm, myAmount: e.target.value })} /></label>
+            {instForm.myAmount !== '' && Number(instForm.amount) >= Number(instForm.myAmount) && <p className="hint">Os outros pagam {money(Number(instForm.amount) - Number(instForm.myAmount))} desta parcela.</p>}
             <label>Situação<select value={instForm.status} onChange={(e) => setInstForm({ ...instForm, status: e.target.value })}><option value="PENDING">Pendente</option><option value="PAID">Paga</option></select></label>
             {instForm.status === 'PAID' && <>
               <label>Data do pagamento<input type="date" value={instForm.paidAt} onChange={(e) => setInstForm({ ...instForm, paidAt: e.target.value })} required /></label>

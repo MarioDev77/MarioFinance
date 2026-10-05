@@ -71,3 +71,15 @@ Para trocar a dívida "celular" atual (12x R$ 150): exclua e cadastre de novo co
 Também mudou: parcela que vence **hoje** não é mais marcada como atrasada (só a partir do dia seguinte).
 
 Depois do deploy, `/api/health` deve responder `build: "multi-schedule-2026-10-05"`.
+
+## Minha parte das parcelas (dívida dividida)
+
+- Na dívida, o botão de moedas ("Definir minha parte") aplica a todas as parcelas um **percentual** ou **valor fixo**, em todas ou só nas não pagas. Também remove a divisão.
+- Clique em qualquer parcela (ou no lápis) para editar: valor, **minha parte**, situação, data e forma de pagamento, descrição.
+- Com a minha parte definida, o painel, o calendário e o botão Pagar usam o **seu** valor. O total da dívida continua o inteiro, e a dívida mostra também "Minha parte: paguei X de Y".
+- Aplicar a minha parte em parcelas já pagas também ajusta o valor do pagamento registrado.
+
+### ATENÇÃO: coluna nova no banco
+Esta versão adiciona o campo opcional `myAmount` em `DebtInstallment`. O comando `start` do backend agora roda `prisma db push --skip-generate` antes de subir, então o Railway cria a coluna sozinho no próximo deploy. Se o deploy falhar por causa disso, rode `npx prisma db push` apontando para o banco de produção. Sem a coluna, a tela de dívidas dá erro 500.
+
+`/api/health` deve responder `build: "my-share-2026-10-05"`.

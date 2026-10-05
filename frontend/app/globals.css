@@ -212,3 +212,7 @@ input::placeholder, textarea::placeholder { color: #5f7199; }
 
 .plan-row { display: grid; grid-template-columns: 1.3fr 1fr 1fr auto; gap: 8px; align-items: end; }
 @media (max-width: 520px) { .plan-row { grid-template-columns: 1fr 1fr; } }
+
+.inst-row.clickable { cursor: pointer; }
+.inst-row.clickable:hover { background: rgba(47,123,255,.07); }
+.my-share { color: #7fb0ff; }

@@ -227,6 +227,7 @@ model DebtInstallment {
   debt              Debt              @relation(fields: [debtId], references: [id], onDelete: Cascade)
   installmentNumber Int
   amount            Decimal           @db.Decimal(14, 2)
+  myAmount          Decimal?          @db.Decimal(14, 2) // minha parte da parcela (dívida dividida); null = parcela inteira
   dueDate           DateTime
   paidAt            DateTime?
   status            InstallmentStatus @default(PENDING)
