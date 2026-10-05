@@ -1,10 +1,9 @@
-import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Acesso | Granja Oliveira',
-  description: 'Acesso seguro ao sistema de gestão da Granja Oliveira.',
+  title: 'Acesso | MarioFin',
+  description: 'Acesso seguro ao sistema de gestão financeira MarioFin.',
   generator: 'v0.app',
   icons: {
     icon: [
@@ -42,7 +41,6 @@ export default function RootLayout({
     <html lang="pt-BR">
       <body className="antialiased">
         {children}
-        {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>
   )
